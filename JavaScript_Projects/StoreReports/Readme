@@ -1,0 +1,2 @@
+This program creates and reports for an end user, based on inputs. Examples of reports would be sales for a store, or current inventory in stock. 
+The base framework was provided for the store information and main functions, but report implementation was created by my programming team.

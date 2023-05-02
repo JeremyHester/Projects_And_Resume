@@ -1,0 +1,760 @@
+// "Project Hike" is a capstone project for the Ingram School of Engineering at Texas State University.
+//  The following code was written by the members of Project Hike, and are credited in order of contributions made:
+//  Jeremy Hester, Jack Hotchkiss, Leigh Cross, and Samuel Osagie
+//  The connections required for the auxillary components are listed below, and the device utilizes the following hardware:
+//  18650 3.7V battery, ESP32 Lolin Lite Vroom, BME 280, Neo-6m GT-U7 GPS module, TF microSD adapter, SSD1306 OLED display, a voltage divider, and a start/stop button 
+
+
+// Both BME and Display connects:
+// gnd to gnd
+// vcc to 3v
+// scl to 12
+// sda to 14
+
+//GT-U7 connects:
+// TX to 16
+// RX to 17
+// gnd to gnd
+// vcc to 3v
+
+// sd card module connects:
+// gnd to gnd
+// vcc to 3v
+// miso to 19
+// mosi to 23
+// sck to 18
+// cs to 5
+
+//start/stop to 2 
+
+#include <SSD1306Ascii.h>
+#include <Adafruit_SSD1306.h>
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
+#include <TinyGPS++.h>
+#include <HardwareSerial.h>
+#include <SoftwareSerial.h>
+#include <String.h>
+#include <SD.h>
+#include <FS.h>
+#include <SPI.h>
+
+File dataFile; //initializing the data file for sd card
+const int chipSelect = 5; // pin CS on microsSD is connected to
+const int buttonPin = 2;  // the number of the pushbutton pin
+
+
+#define SDA 14
+#define SCL 12
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define PPS_PIN 4
+
+volatile unsigned long interruptTime = 0;
+volatile bool interruptFlag = false;
+
+void ICACHE_RAM_ATTR onPPS() {
+  interruptTime = millis();
+  interruptFlag = true;}
+
+bool startStop;
+bool activeMode;
+bool passiveMode;
+bool lowPowerMode;
+float curLong;
+float curLat;
+float savedLong;
+float savedLat; 
+float curTemp;
+float savedTemp;
+float curHumid;
+float savedHumid;
+int batteryCount;  //used to determine when to read the battery in intervals
+int lastpowerState = HIGH; // the previous state from the input pin
+int lastmodeState = HIGH;
+int powerState;     // the current reading from the input pin
+int modeState;
+long int SLEEP_DURATION;
+bool modestatus = 0;
+bool welcomed;
+bool running;
+
+// power 
+const int MAX_ANALOG_VAL = 4095;
+const float MAX_BATTERY_VOLTAGE = 4.08; 
+int bat_percentage;
+float voltageLevel;
+float batteryFraction;
+int rawValue;
+int noLoc; //used to move from active to passive 
+int buttonState = 0;  // variable for reading the pushbutton status
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET); //configuring display
+Adafruit_BME280 bme;
+HardwareSerial serialGPS(1); // RXD to pin 17, TXD to pin 16
+TinyGPSPlus gps;
+
+void IRAM_ATTR toggleStartStop() //used to have the button switch states between active and low power 
+{
+  if(startStop==true)
+  {
+    startStop=false;
+  }else 
+    {startStop=true;}
+
+}
+
+void setup(){
+
+Serial.begin(9600);
+delay(5000);
+startStop=true; //false = stop, true = start
+passiveMode = false;
+activeMode=true;
+lowPowerMode =false;
+welcomed =false;
+running=true;
+voltageLevel=4.0;
+bat_percentage =75;
+noLoc=0;
+
+// initialize the pushbutton pin as an input:
+  pinMode(buttonPin, INPUT);
+  attachInterrupt(buttonPin, toggleStartStop, RISING);//enables an interrupt
+
+ while(!Serial){ // if the connection is bad, the program holds
+    ;
+  }
+  if (!SD.begin(chipSelect)){ //starts the sd card module
+     Serial.println("initialization failed.");
+  }
+  else {
+    Serial.println("Wiring is correct and a card is present.");
+    writeFile(SD, "/data.txt", ""); //should initially clear the text file on sd card
+  }
+  Wire.begin(SDA, SCL);
+  serialGPS.begin(9600, SERIAL_8N1, 16, 17); //starts gps
+  
+
+  if (!bme.begin(0x76)) {   //starts bme
+    Serial.println("Could not find a valid BME280 sensor, check wiring!");
+    while (1);
+  }
+
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)){ //starts display
+    Serial.println(F("SSD1306 Allocation Failed"));
+    for(;;);
+  }
+
+  uint8_t cardType = SD.cardType();
+  if(cardType == CARD_NONE) {
+    Serial.println("No SD card attached");  //checks if the sd card is inserted
+    return;
+  }
+  batteryRead();
+  display.clearDisplay();
+  welcome();
+}
+
+void loop(){ 
+   while(!welcomed){
+   welcome();}
+  curTemp=readTemp();
+  curHumid=readHumid();
+
+  if(curTemp!=0.0)
+  {
+    savedTemp=curTemp;
+  }
+  if(curHumid!=0.0)
+  {
+    savedHumid=curHumid;
+  }
+
+while(running){     //the forever loop that runs during the time that the device is on. 
+    while(passiveMode)
+        { 
+          passiveSample(); // state 2 (standby)
+        }
+
+    while(activeMode){
+        activeSample();   // state 1 (sampling)
+        }
+
+    while(lowPowerMode) //state 3 (low freq sampling)
+    {lowPow();}
+
+            }  
+}
+
+
+void activeSample()
+{          
+  Serial.print("\n");
+  Serial.print("\n");
+  Serial.print("In active mode");
+  Serial.print("\n");
+          samplegps();
+
+
+//correcting for if more than 100m or roughly 4mi/hr for low, 8 mi/hr passive, 16mi/hr active currently with sampling rates 
+//if( gps.speed.mps() > 20.0)
+  Serial.print("CurLat:");
+  Serial.println(curLat);
+  Serial.print("CurLong:");
+  Serial.println(curLong);
+
+  display.clearDisplay();
+  displayTime();
+  displayActive();
+  displayHRsRem();
+  curTemp = readTemp();
+  curHumid=readHumid();
+  batteryCount++;
+  if(batteryCount%20 ==0)
+      {batteryRead();
+
+          if(bat_percentage<50)
+          {
+             activeMode =false;
+            lowPowerMode=true;
+            //activeMode =false;
+          }
+
+        }
+          //checking the current values. Can add a validity check later to see if valid inputs
+      if(curTemp!=savedTemp)
+          {savedTemp=curTemp;}
+      if(curHumid!=savedTemp)
+          {savedTemp=curHumid;}
+      displayTemp(curTemp);
+      displayHumid(curHumid);
+      displayLAT();
+      displayLNG();
+      displaySatellites();
+      display_battery();
+      display.display();
+
+      appendFile(SD, "/data.txt", "\n"); //delineates data to a new line
+          if(startStop==false)
+              {passiveMode=true;
+              activeMode=false;}
+      Serial.println("");
+      delay(4600);
+
+           
+}
+
+
+void passiveSample()
+{
+// state 1 (sampling gps)
+//Serial.print("Passive sampling");
+displayPassive();
+
+samplegps(); 
+
+
+Serial.print("Last cur lat:");
+Serial.println(curLat);
+Serial.print("Last cur long:");
+Serial.println(curLong);  
+
+//if not a number, put it as saved location
+savedLong=curLong;
+savedLat=curLat;
+//correcting for if more than 100m or roughly 4mi/hr for low, 8 mi/hr passive, 16mi/hr active currently with sampling rates 
+//if( gps.speed.mps() > 20.0)
+Serial.print("CurLat:");
+Serial.println(curLat);
+Serial.print("CurLong:");
+Serial.println(curLong);
+batteryCount++;
+          if(batteryCount%5 ==0){
+ if(bat_percentage<20)
+       {
+            lowPowerMode=true;
+            passiveMode =false;
+          }
+}
+
+
+  if(startStop==true)
+    {
+      activeMode=true;
+      passiveMode=false;
+    }
+delay(14800);
+//15 second sampling rate 
+  
+}
+
+
+void lowPow()
+{ 
+  Serial.print("\n");
+  Serial.print("Low power sampling");
+  Serial.print("\n");
+  Serial.print("\n");
+  samplegps();  
+
+
+Serial.print("CurLat:");
+Serial.println(curLat);
+Serial.print("CurLong:");
+Serial.println(curLong); 
+  savedTemp=readTemp();
+  savedHumid=readHumid();
+   savedLong=curLong;
+  savedLat=curLat;
+  //write data to SD
+    
+     batteryCount++;
+    if(batteryCount%5==0)
+    {batteryRead();
+  
+  if(bat_percentage>=50)
+    {
+      passiveMode = true;
+      lowPowerMode= false;
+    }
+    }
+    displayLowPow();
+    display.clearDisplay();
+    display.display();
+    delay(56000); //running once a minute with 3 seconds delay in the low power signal 
+}
+
+
+void samplegps(){
+ while (serialGPS.available()) { //enters if the serial connection is valid
+     gps.encode(serialGPS.read());} //reads gps data, determining a satellite lock
+      
+     
+      curLong=gps.location.lng();
+      curLat= gps.location.lat();
+      if(curLong!=savedLong)
+      {savedLong=curLong; }
+      if(curLat!=savedLat)
+        {savedLat=curLat;}
+   
+
+}
+
+float readTemp(){
+  float temperature = bme.readTemperature();
+  float fTemp = (temperature * 1.8) + 32; //converting from celsius to farenheit
+  return fTemp;
+}
+
+ void batteryRead(){
+  float tempVolt;
+  if (voltageLevel<2.8)
+    { tempVolt = voltageLevel;  }
+    else { tempVolt=4.2; } 
+  rawValue = analogRead(36);
+  voltageLevel = (rawValue / 4096.0) *3.3 * 2*(4.14/3.74);
+    if(tempVolt<voltageLevel)
+        {
+          voltageLevel=tempVolt;
+        }
+  batteryFraction = voltageLevel / MAX_BATTERY_VOLTAGE;
+  bat_percentage = batteryFraction * 100; 
+  //bat_percentage = mapfloat(voltageLevel, 2.8, 4.2, 0, 100); 
+  if (bat_percentage >= 100) {
+    bat_percentage = 100;
+  }
+  if (bat_percentage <= 0) {
+    bat_percentage = 1;
+    }
+  }
+
+float readHumid(){
+  return bme.readHumidity();
+}
+
+void displayTime(){
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(80, 0); //displaying time 8 pixels from the top of display
+  display.cp437(true);
+
+  int hour = (gps.time.hour() - 6); //accounting for wrong timezone
+  int min = gps.time.minute();
+  int sec = gps.time.second();
+  int day = gps.date.day();
+  int year = gps.date.year();
+  int meridiem = 0;
+  int correctedHour = 0;
+
+  if(gps.time.hour() < 6){  //accounting for wrong timezone
+    day = gps.date.day()-1;
+  }
+  if(hour < 1){ //accounting for wrong timezone
+    hour += 24;
+  }
+  if (hour>12){
+    correctedHour = hour - 11;
+  }
+  if (hour<=12){
+    correctedHour = hour +1;
+  }
+
+
+  //changing each variable to a charArray so the ascii display can actually display it properly
+  char charCorrectedHour[5];
+  itoa(correctedHour, charCorrectedHour, 10);
+  char charHour[5];
+  itoa(hour, charHour, 10);
+  char charMin[5];
+  itoa(min, charMin, 10);
+  char charSec[5];
+  itoa(sec, charSec, 10);
+
+  display.write(charCorrectedHour);
+  display.write(":");
+  if (min<=9){                 
+    display.write("0");
+    display.write(charMin);
+  }
+  else {
+  display.write(charMin);
+  }
+
+  if (hour>=12){
+    meridiem = 1;
+    hour = hour - 12;
+  }
+  if (meridiem==1){display.write(" PM");}
+  else{display.write(" AM"); }
+  
+  //changing each variable to a charArray so the sd card can write them
+  char charMonth[5];
+  int month = gps.date.month();
+  itoa(month, charMonth, 10);
+  char charDay[5];
+  itoa(day, charDay, 10);
+  char charYear[5];
+  itoa(year, charYear, 10);
+
+  //write to console
+  Serial.print(charMonth);
+  Serial.print("/");
+  Serial.print(charDay);
+  Serial.print("/");
+  Serial.print(charYear);
+  Serial.print("    ");
+  Serial.print(charHour);
+  Serial.print(":");
+  Serial.print(charMin);
+  Serial.print(":");
+  Serial.print(charSec);
+  Serial.print("\n");
+
+
+  //new way of writing to sd card with ESP32. only accepts charArrays
+  appendFile(SD, "/data.txt", charMonth);
+  appendFile(SD, "/data.txt", "/");
+  appendFile(SD, "/data.txt", charDay);
+  appendFile(SD, "/data.txt", "/");
+  appendFile(SD, "/data.txt", charYear);
+  appendFile(SD, "/data.txt", " ");
+  appendFile(SD, "/data.txt", charHour);
+  appendFile(SD, "/data.txt", ":");
+  appendFile(SD, "/data.txt", charMin);
+  appendFile(SD, "/data.txt", ":");
+  appendFile(SD, "/data.txt", charSec);
+  appendFile(SD, "/data.txt", " ");
+}
+
+void displayTemp(float temp){
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 16); //displaying temp 16 pixels from the top of display
+  display.cp437(true);
+
+  //concatenating the string with the temperature then changing to charArray for display
+  String Writetemp = "Temp: ";
+  Writetemp += temp;
+  char out[20];
+  Writetemp.toCharArray(out, 20);
+  display.write(out);
+
+  //write to console
+  Serial.print("Temp:");
+  Serial.println(temp);
+
+  //another conversion for the sd card since it only accepts charArray
+  String tempString;
+  tempString = String(temp);
+  char writeTemp[10];
+  tempString.toCharArray(writeTemp, 10);
+  appendFile(SD, "/data.txt", writeTemp);
+  appendFile(SD, "/data.txt", " ");
+}
+
+void displayHumid(float humid){
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 24); //displaying humidity 24 pixels from the top of display
+  display.cp437(true);
+
+  //concatenating the string with the humidity then changing to charArray for display
+  String Writehumid = "Humidity: ";
+  Writehumid += humid;
+  char out[20];
+  Writehumid.toCharArray(out, 20);
+  display.write(out);
+
+  //write to console
+  Serial.print("Humidity:");
+  Serial.println(humid);
+
+  //another conversion for the sd card since it only accepts charArray  
+  String humidString;
+  humidString = String(humid);
+  char writeHumid[10];
+  humidString.toCharArray(writeHumid, 10);
+  appendFile(SD, "/data.txt", writeHumid);
+  appendFile(SD, "/data.txt", " ");
+}
+
+void displayLAT(){
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 32); //displaying latitude 32 pixels from the top of display
+  display.cp437(true);
+
+  //write to console
+  Serial.print("Latitude: ");
+  Serial.println(curLat, 6);
+
+  //converting string to a charArray for display
+  String latitude = String(curLat, 6);
+  String Writelat = "Lat: ";
+  Writelat += latitude;
+  char out[20];
+  Writelat.toCharArray(out, 20);
+  display.write(out);
+
+  //converting string to charArray for writing to sd card
+  char out2[20];
+  latitude.toCharArray(out2, 20);
+  appendFile(SD, "/data.txt", out2);
+  appendFile(SD, "/data.txt", " ");
+}
+
+
+
+void displayLNG(){
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 41); //displaying longitude 40 pixels from the top of display
+  display.cp437(true);
+
+  //write to console
+  Serial.print("Longitude: ");
+  Serial.println(curLong, 6);
+
+  //converting string to a charArray for display
+  String longitude = String(curLong, 6);
+  String Writelng = "Long: ";
+  Writelng += longitude;
+  char out[20];
+  Writelng.toCharArray(out, 20);
+  display.write(out);
+
+  //converting string to charArray for writing to sd card
+  char out2[20];
+  longitude.toCharArray(out2, 20);
+  appendFile(SD, "/data.txt", out2);
+  appendFile(SD, "/data.txt", " ");
+}
+
+void writeFile(fs::FS &fs, const char * path, const char * message){  //copied code for to be able to wipe the sd card. writeFile replaces whats in the file with the passed parameter
+  //Serial.printf("Writing file: %s\n", path);
+
+  File file = fs.open(path, FILE_WRITE);
+  if(!file){
+    Serial.println("Failed to open file for writing");
+    return;
+  }
+  file.print(message);
+
+  file.close();
+}
+
+void appendFile(fs::FS &fs, const char * path, const char * message){ //copied code for to be able to add data to the sd card. appendFile adds the passed parameter to the end of the file
+  //Serial.printf("Appending to file: %s\n", path);
+
+  File file = fs.open(path, FILE_APPEND);
+  if(!file){
+    Serial.println("Failed to open file for appending");
+    return;
+  }
+   file.print(message);
+  //     Serial.println("Message appended");
+  // } else {
+  //   Serial.println("Append failed");
+  // }
+  file.close();
+}
+// Not Displaying 
+
+void display_battery() {
+display.setTextSize(1);
+display.setCursor(20,0);
+display.print("Bat:");
+display.print(bat_percentage);
+display.print("% ");
+Serial.println();
+Serial.println((String)"Battery Percentage: "+ bat_percentage + "%");
+display.drawRect(1, 2, 8, 4, WHITE);
+display.drawRect(9, 3, 1, 2, WHITE);
+display.fillRect(1, 2, (int)(1 * bat_percentage) /10, 4, WHITE);
+display.display();
+//delay(10000); commented out now as it will display based on sampling rates
+}
+
+void printDateTime(TinyGPSTime &t, TinyGPSDate &d) {
+  char buffer[32];
+  sprintf(buffer, "%02d/%02d/%02d %02d:%02d:%02d", 
+          d.month(), d.day(), d.year() % 100,
+          t.hour(), t.minute(), t.second());
+  Serial.println(buffer);
+}
+
+void printDateTimeFromPPS(TinyGPSDate &d) {
+  char buffer[32];
+  sprintf(buffer, "%02d/%02d/%02d %02d:%02d:%02d", 
+          d.month(), d.day(), d.year() % 100,
+          (interruptTime / 1000) % 60, (interruptTime / 1000 / 60) % 60, interruptTime / 1000 / 3600);
+  Serial.println(buffer);
+}
+ float mapfloat(float x, float in_min, float in_max, float out_min, float out_max)
+{
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
+void welcome(){
+  display.clearDisplay();
+  display.display();
+
+  display.setTextSize(2);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 0); //displaying longitude 40 pixels from the top of display
+  display.cp437(true);
+
+  display.print("Welcome");
+  display.setCursor(0, 20);
+  display.print("  to");
+  display.setCursor(0, 40);
+  display.print(" H.I.K.E.!");
+  display.display();
+  delay(5000);
+  display.clearDisplay();
+  display.setTextSize(1);
+  
+  for(int i =0; i<8; i++){
+    display.setCursor(0,32);
+    if(i%4 == 0){
+      display.print("Initializing");
+    }
+    else if(i%4 == 1){
+      display.print("Initializing.");      
+    }
+    else if(i%4 == 2){
+      display.print("Initializing..");
+    }
+    else if(i%4 == 3){
+      display.print("Initializing...");
+    }
+    display.display();
+    delay(300);
+    display.clearDisplay();
+  }
+  display.clearDisplay();
+  display.display();
+  welcomed=true;
+}
+
+void displayActive(){
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(90, 57); //displaying longitude 40 pixels from the top of display
+  display.cp437(true);
+
+  display.print("Active");
+}
+
+void displayHRsRem()
+{
+  float batHR = (bat_percentage/100.00)*20.00;
+  String dispHrs = String(batHR,1);
+  String theDisp = "HRs left:";
+  theDisp +=dispHrs;
+  Serial.println("Hours left:");
+  Serial.print(theDisp);
+ display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 8); //displaying hours of life 40 pixels from the top of display
+  display.cp437(true);
+
+  display.print(theDisp);
+}
+
+
+void displayPassive(){
+  
+  display.clearDisplay();
+  display.display();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(85, 57); //displaying longitude 40 pixels from the top of display
+  display.cp437(true);
+
+  display.print("Passive");
+  display.display();
+}
+
+void displaySatellites(){
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 49); //displaying longitude 40 pixels from the top of display
+  display.cp437(true);
+
+  //write to console
+  Serial.print("Satellite #: ");
+  Serial.println(gps.satellites.value());
+
+  //converting string to a charArray for display
+  String satNum = String(gps.satellites.value());
+  String WriteSatNum = "Satellite #: ";
+  WriteSatNum += satNum;
+  char out[20];
+  WriteSatNum.toCharArray(out, 20);
+  display.write(out);
+
+  //converting string to charArray for writing to sd card
+  char out2[20];
+  satNum.toCharArray(out2, 20);
+  appendFile(SD, "/data.txt", out2);
+  appendFile(SD, "/data.txt", " ");
+}
+
+
+void displayLowPow(){
+  
+  display.clearDisplay();
+  display.display();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(30, 31); //displaying longitude 40 pixels from the top of display
+  display.cp437(true);
+
+  display.print("Low Power");
+  display.display();
+  delay(3000);
+}

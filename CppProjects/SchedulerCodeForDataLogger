@@ -198,9 +198,6 @@ void activeSample()
   Serial.print("\n");
           samplegps();
 
-
-//correcting for if more than 100m or roughly 4mi/hr for low, 8 mi/hr passive, 16mi/hr active currently with sampling rates 
-//if( gps.speed.mps() > 20.0)
   Serial.print("CurLat:");
   Serial.println(curLat);
   Serial.print("CurLong:");
@@ -224,7 +221,7 @@ void activeSample()
           }
 
         }
-          //checking the current values. Can add a validity check later to see if valid inputs
+          //Updating current values if changed
       if(curTemp!=savedTemp)
           {savedTemp=curTemp;}
       if(curHumid!=savedTemp)
@@ -243,6 +240,7 @@ void activeSample()
               activeMode=false;}
       Serial.println("");
       delay(4600);
+      //5 second delay with processing speed accounted for
 
            
 }
@@ -250,8 +248,6 @@ void activeSample()
 
 void passiveSample()
 {
-// state 1 (sampling gps)
-//Serial.print("Passive sampling");
 displayPassive();
 
 samplegps(); 
@@ -265,8 +261,6 @@ Serial.println(curLong);
 //if not a number, put it as saved location
 savedLong=curLong;
 savedLat=curLat;
-//correcting for if more than 100m or roughly 4mi/hr for low, 8 mi/hr passive, 16mi/hr active currently with sampling rates 
-//if( gps.speed.mps() > 20.0)
 Serial.print("CurLat:");
 Serial.println(curLat);
 Serial.print("CurLong:");
@@ -287,7 +281,7 @@ batteryCount++;
       passiveMode=false;
     }
 delay(14800);
-//15 second sampling rate 
+//15 second sampling rate with built in processing speed
   
 }
 
@@ -574,7 +568,6 @@ void displayLNG(){
 }
 
 void writeFile(fs::FS &fs, const char * path, const char * message){  //copied code for to be able to wipe the sd card. writeFile replaces whats in the file with the passed parameter
-  //Serial.printf("Writing file: %s\n", path);
 
   File file = fs.open(path, FILE_WRITE);
   if(!file){
@@ -587,7 +580,6 @@ void writeFile(fs::FS &fs, const char * path, const char * message){  //copied c
 }
 
 void appendFile(fs::FS &fs, const char * path, const char * message){ //copied code for to be able to add data to the sd card. appendFile adds the passed parameter to the end of the file
-  //Serial.printf("Appending to file: %s\n", path);
 
   File file = fs.open(path, FILE_APPEND);
   if(!file){
@@ -595,6 +587,7 @@ void appendFile(fs::FS &fs, const char * path, const char * message){ //copied c
     return;
   }
    file.print(message);
+//Uncomment lines below to check save
   //     Serial.println("Message appended");
   // } else {
   //   Serial.println("Append failed");
